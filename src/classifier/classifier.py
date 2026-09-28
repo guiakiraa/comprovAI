@@ -60,6 +60,10 @@ def classify_file(filename: str) -> dict:
 
     result = json.loads(response.choices[0].message.content)
 
+    original_ext = os.path.splitext(filename)[1]
+    new_base = os.path.splitext(result["new_filename"])[0]
+    result["new_filename"] = f"{new_base}{original_ext}"
+
     if result["category"] == "outros":
         name, ext = os.path.splitext(result["new_filename"])
         result["new_filename"] = f"{name}_{generate_random_id()}{ext}"
