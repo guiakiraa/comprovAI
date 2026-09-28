@@ -67,24 +67,22 @@ O novo nome segue `{categoria}_{mes}_{ano}_{detalhes}.{extensao}` — sempre min
 
 As categorias são travadas por JSON Schema na chamada ao modelo ([classifier.py](src/classifier/classifier.py)), então o LLM não consegue inventar uma categoria nova. As regras de nomenclatura ficam em [prompts.py](src/classifier/prompts.py).
 
-## Por que duas identidades do Google
+## Autenticação com o Drive
 
-Este é o ponto menos óbvio do projeto, e a principal fonte de confusão no setup: o ComprovAI usa **duas credenciais diferentes** para falar com o mesmo Drive.
+O ComprovAI usa só a **service account** (via ADC) para tudo — listar, baixar e limpar a pasta ([drive.py](src/drive/drive.py)):
 
-| Operação        | Identidade                 | Escopo           |
-| --------------- | -------------------------- | ---------------- |
-| Listar e baixar | Service account (via ADC)  | `drive.readonly` |
-| Apagar          | Token OAuth de usuário     | `drive`          |
+| Operação              | Escopo           |
+| --------------------- | ---------------- |
+| Listar e baixar       | `drive.readonly` |
+| Mover para a lixeira  | `drive`          |
 
-O motivo: uma service account **não consegue apagar arquivos de uma conta pessoal do Google**, mesmo com a pasta compartilhada com ela — o arquivo pertence a você, não a ela. Por isso a exclusão passa por um token OAuth autorizado pela sua própria conta ([drive.py](src/drive/drive.py)).
-
-Quando esse token expira, ele é renovado e a versão nova é gravada de volta no Secret Manager, para sobreviver ao reinício do container.
+Uma service account não consegue **excluir permanentemente** (`files.delete`) um arquivo de uma conta pessoal do Google — só o dono pode fazer isso. Mas **mover para a lixeira** (`files.update` com `trashed: true`) só exige permissão de escrita (Editor) na pasta, que a service account já tem. Por isso o ComprovAI move o original para a lixeira em vez de apagar de verdade — o arquivo some da pasta de entrada mas fica recuperável por até 30 dias.
 
 ## Stack
 
 - **Python 3.11** + [functions-framework](https://github.com/GoogleCloudPlatform/functions-framework-python)
 - **OpenAI** `gpt-4o-mini` com structured output (JSON Schema, `temperature=0`)
-- **Google Drive API v3**, **Cloud Storage**, **Secret Manager**
+- **Google Drive API v3**, **Cloud Storage**
 - **Cloud Run** (modo função), com build via Buildpacks — não há Dockerfile
 - **Cloud Build** para o deploy contínuo
 
@@ -100,7 +98,7 @@ Quando esse token expira, ele é renovado e a versão nova é gravada de volta n
     │   ├── classifier.py      # chamada ao LLM com JSON Schema
     │   └── prompts.py         # categorias e regras de nomenclatura
     ├── drive/
-    │   └── drive.py           # listar, baixar, apagar + as duas autenticações
+    │   └── drive.py           # listar, baixar, mover para a lixeira
     ├── storage/
     │   └── gcs.py             # upload para o bucket
     ├── logger.py
@@ -137,31 +135,21 @@ gcloud storage buckets add-iam-policy-binding gs://SEU_BUCKET \
   --role=roles/storage.objectAdmin
 ```
 
-**4. Compartilhe a pasta do Drive** com o e-mail da service account (`receipt-payment-organizer@SEU_PROJETO.iam.gserviceaccount.com`), como leitor. O `DRIVE_FOLDER_ID` é o trecho final da URL da pasta: `drive.google.com/drive/folders/`**`<esse-id-aqui>`**.
+**4. Compartilhe a pasta do Drive** com o e-mail da service account (`receipt-payment-organizer@SEU_PROJETO.iam.gserviceaccount.com`), como **Editor** (não leitor — a service account precisa poder mover arquivos para a lixeira). O `DRIVE_FOLDER_ID` é o trecho final da URL da pasta: `drive.google.com/drive/folders/`**`<esse-id-aqui>`**.
 
-**5. Crie os 5 secrets** no Secret Manager — o Cloud Build lê todos eles no deploy:
+**5. Crie os 3 secrets** no Secret Manager — o Cloud Build lê todos eles no deploy:
 
-| Secret              | Conteúdo                                        |
-| ------------------- | ----------------------------------------------- |
-| `OPENAI_API_KEY`    | sua chave da OpenAI                             |
-| `GCS_BUCKET_NAME`   | nome do bucket                                  |
-| `DRIVE_FOLDER_ID`   | ID da pasta de entrada                          |
-| `OAUTH_CREDENTIALS` | JSON do cliente OAuth (tipo *app instalado*)    |
-| `OAUTH_TOKEN`       | JSON do token gerado no bootstrap (veja abaixo) |
+| Secret            | Conteúdo             |
+| ----------------- | --------------------- |
+| `OPENAI_API_KEY`  | sua chave da OpenAI   |
+| `GCS_BUCKET_NAME` | nome do bucket        |
+| `DRIVE_FOLDER_ID` | ID da pasta de entrada|
 
 ```bash
 printf 'SEU_VALOR' | gcloud secrets create OPENAI_API_KEY --data-file=-
 ```
 
-A service account precisa poder gravar novas versões do token renovado:
-
-```bash
-gcloud secrets add-iam-policy-binding OAUTH_TOKEN \
-  --member=serviceAccount:receipt-payment-organizer@SEU_PROJETO.iam.gserviceaccount.com \
-  --role=roles/secretmanager.secretVersionAdder
-```
-
-E a service account do Cloud Build precisa de `roles/secretmanager.secretAccessor` nos cinco secrets, além de permissão para fazer deploy no Cloud Run.
+A service account do Cloud Build precisa de `roles/secretmanager.secretAccessor` nos três secrets, além de permissão para fazer deploy no Cloud Run.
 
 ## Variáveis de ambiente
 
@@ -170,29 +158,11 @@ E a service account do Cloud Build precisa de `roles/secretmanager.secretAccesso
 | `OPENAI_API_KEY`                 | sim         | Lida automaticamente pelo SDK da OpenAI                               |
 | `GCS_BUCKET_NAME`                | sim         | Bucket de destino                                                     |
 | `DRIVE_FOLDER_ID`                | sim         | Pasta de entrada no Drive                                             |
-| `OAUTH_CREDENTIALS_FILE`         | não         | Padrão `oauth-credentials.json`                                       |
-| `OAUTH_TOKEN_FILE`               | não         | Padrão `oauth-token.json`                                             |
 | `GOOGLE_APPLICATION_CREDENTIALS` | só local    | Caminho do `service-account.json`; no Cloud Run o ADC resolve sozinho |
 
 Copie o [.env.example](.env.example) para `.env` e preencha.
 
-## Bootstrap do OAuth (passo obrigatório)
-
-O fluxo OAuth abre um navegador para você autorizar o acesso — o que **só funciona na sua máquina**, nunca no Cloud Run. Faça isso uma vez, antes do primeiro deploy:
-
-1. No Google Cloud Console, crie uma credencial OAuth do tipo **App para computador** e baixe o JSON como `oauth-credentials.json` na raiz do projeto.
-2. Rode o projeto localmente (seção abaixo) e dispare uma execução. Na hora de apagar o primeiro arquivo, o navegador abre pedindo autorização.
-3. Autorize. O arquivo `oauth-token.json` é gravado na raiz.
-4. Publique os dois no Secret Manager:
-
-```bash
-gcloud secrets create OAUTH_CREDENTIALS --data-file=oauth-credentials.json
-gcloud secrets create OAUTH_TOKEN       --data-file=oauth-token.json
-```
-
-Sem esse passo o deploy sobe normalmente, mas a função não consegue apagar nada do Drive — e falha com uma mensagem pedindo exatamente este bootstrap.
-
-> Os três arquivos de credencial (`service-account.json`, `oauth-credentials.json`, `oauth-token.json`) estão no `.gitignore` e nunca devem ser commitados.
+> O arquivo de credencial (`service-account.json`) está no `.gitignore` e nunca deve ser commitado.
 
 ## Rodando localmente
 
@@ -205,7 +175,7 @@ pip install -r requirements.txt
 cp .env.example .env            # preencha os valores
 ```
 
-Coloque `service-account.json` e `oauth-credentials.json` na raiz e suba o servidor:
+Coloque `service-account.json` na raiz e suba o servidor:
 
 ```bash
 functions-framework --target=run --debug --port=8080
@@ -219,10 +189,9 @@ curl http://localhost:8080
 
 ## Deploy
 
-O deploy é automático: **todo push na `main`** dispara o Cloud Build, que executa o [cloudbuild.yaml](cloudbuild.yaml) em dois passos:
+O deploy é automático: **todo push na `main`** dispara o Cloud Build, que executa o [cloudbuild.yaml](cloudbuild.yaml):
 
-1. Materializa `oauth-credentials.json` e `oauth-token.json` no workspace a partir do Secret Manager — eles não existem no repositório.
-2. Roda `gcloud beta run deploy comprovai --source=. --function=run`, que constrói a imagem via Buildpacks e publica em `southamerica-east1` com 512 Mi e timeout de 300 s.
+1. Roda `gcloud beta run deploy comprovai --source=. --function=run`, que constrói a imagem via Buildpacks e publica em `southamerica-east1` com 512 Mi e timeout de 300 s.
 
 O serviço sobe como **privado** (`--no-allow-unauthenticated`).
 
@@ -290,5 +259,5 @@ gcloud run services logs read comprovai --region=southamerica-east1
 ## Notas de comportamento
 
 - **A classificação usa apenas o nome do arquivo** — não há OCR nem leitura do conteúdo. Um arquivo chamado `documento.pdf` cai em `outros`. A qualidade do resultado depende de quão descritivos são os nomes na origem.
-- **A exclusão no Drive é permanente** (`files.delete`, não vai para a lixeira). O arquivo só é apagado depois do upload para o GCS ser confirmado.
+- **O original vai para a lixeira do Drive** (`files.update` com `trashed: true`), não é excluído permanentemente — fica recuperável por até 30 dias. Isso só acontece depois do upload para o GCS ser confirmado.
 - Cada arquivo é carregado inteiro em memória. O limite de 512 Mi comporta comprovantes normais com folga, mas não anexos muito grandes.

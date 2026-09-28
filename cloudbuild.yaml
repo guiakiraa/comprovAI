@@ -6,17 +6,6 @@ steps:
     args:
       - -c
       - |
-        echo $$OAUTH_CREDENTIALS > oauth-credentials.json
-        echo $$OAUTH_TOKEN > oauth-token.json
-    secretEnv:
-      - OAUTH_CREDENTIALS
-      - OAUTH_TOKEN
-
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: bash
-    args:
-      - -c
-      - |
         gcloud beta run deploy comprovai \
           --quiet \
           --source=. \
@@ -24,7 +13,7 @@ steps:
           --region=southamerica-east1 \
           --service-account=receipt-payment-organizer@$PROJECT_ID.iam.gserviceaccount.com \
           --no-allow-unauthenticated \
-          --set-env-vars=OPENAI_API_KEY=$$OPENAI_API_KEY,GCS_BUCKET_NAME=$$GCS_BUCKET_NAME,DRIVE_FOLDER_ID=$$DRIVE_FOLDER_ID,OAUTH_CREDENTIALS_FILE=oauth-credentials.json,OAUTH_TOKEN_FILE=oauth-token.json \
+          --set-env-vars=OPENAI_API_KEY=$$OPENAI_API_KEY,GCS_BUCKET_NAME=$$GCS_BUCKET_NAME,DRIVE_FOLDER_ID=$$DRIVE_FOLDER_ID \
           --memory=512Mi \
           --timeout=300s
     secretEnv:
@@ -40,7 +29,3 @@ availableSecrets:
       env: GCS_BUCKET_NAME
     - versionName: projects/$PROJECT_ID/secrets/DRIVE_FOLDER_ID/versions/latest
       env: DRIVE_FOLDER_ID
-    - versionName: projects/$PROJECT_ID/secrets/OAUTH_CREDENTIALS/versions/latest
-      env: OAUTH_CREDENTIALS
-    - versionName: projects/$PROJECT_ID/secrets/OAUTH_TOKEN/versions/latest
-      env: OAUTH_TOKEN
