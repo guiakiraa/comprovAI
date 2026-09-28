@@ -1,8 +1,9 @@
 from openai import OpenAI
 import json
+import os
 from src.classifier.prompts import SYSTEM_PROMPT, USER_PROMPT
 from src.logger import get_logger
-from src.utils import get_current_date
+from src.utils import get_current_date, generate_random_id
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -58,6 +59,11 @@ def classify_file(filename: str) -> dict:
     )
 
     result = json.loads(response.choices[0].message.content)
+
+    if result["category"] == "outros":
+        name, ext = os.path.splitext(result["new_filename"])
+        result["new_filename"] = f"{name}_{generate_random_id()}{ext}"
+        logger.info(f"Categoria 'outros' — ID aleatório adicionado: '{result['new_filename']}'")
 
     logger.info(f"Categoria identificada: '{result['category']}'")
     logger.info(f"Novo nome gerado: '{result['new_filename']}'")
